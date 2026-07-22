@@ -1,0 +1,15 @@
+services:
+  web:
+    build: .
+    container_name: servesense
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8003:8000"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
