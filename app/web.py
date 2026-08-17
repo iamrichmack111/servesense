@@ -68,6 +68,172 @@ def score_people(c, shift_date, meal):
         result.append({**dict(r),'score':score,'reason':reason})
     return sorted(result,key=lambda x:x['score'],reverse=True)
 
+def _minutes(value):
+    if not value or ":" not in value:
+        return None
+    try:
+        hour, minute = map(int, value.split(":", 1))
+        return hour * 60 + minute
+    except (TypeError, ValueError):
+        return None
+
+
+def schedule_conflicts(c, shift_id, staff_id, start_time="", end_time=""):
+    shift = c.execute(
+        "SELECT * FROM shifts WHERE id=?",
+        (shift_id,)
+    ).fetchone()
+
+    staff = c.execute(
+        "SELECT * FROM staff WHERE id=?",
+        (staff_id,)
+    ).fetchone()
+
+    if not shift:
+        return ["Shift not found."]
+
+    if not staff or not staff["active"]:
+        return ["Employee is inactive or does not exist."]
+
+    conflicts = []
+
+    availability = c.execute(
+        """SELECT status,note
+           FROM availability
+           WHERE staff_id=?
+             AND shift_date=?
+             AND meal=?""",
+        (
+            staff_id,
+            shift["shift_date"],
+            shift["meal"]
+        )
+    ).fetchone()
+
+    pto = c.execute(
+        """SELECT 1
+           FROM availability
+           WHERE staff_id=?
+             AND shift_date=?
+             AND status='pto'
+           LIMIT 1""",
+        (
+            staff_id,
+            shift["shift_date"]
+        )
+    ).fetchone()
+
+    if pto or (
+        availability
+        and availability["status"] == "pto"
+    ):
+        conflicts.append(
+            "Employee is on PTO for this date."
+        )
+
+    elif (
+        availability
+        and availability["status"] == "unavailable"
+    ):
+        conflicts.append(
+            f"Employee is unavailable for {shift['meal']}."
+        )
+
+    duplicate = c.execute(
+        """SELECT sh.id
+           FROM assignments a
+           JOIN shifts sh ON sh.id=a.shift_id
+           WHERE a.staff_id=?
+             AND sh.id<>?
+             AND sh.shift_date=?
+             AND sh.meal=?
+           LIMIT 1""",
+        (
+            staff_id,
+            shift_id,
+            shift["shift_date"],
+            shift["meal"]
+        )
+    ).fetchone()
+
+    if duplicate:
+        conflicts.append(
+            "Employee is already assigned to another "
+            f"{shift['meal']} shift on this date."
+        )
+
+    new_start = _minutes(start_time)
+    new_end = _minutes(end_time)
+
+    if (
+        new_start is not None
+        and new_end is not None
+        and new_end > new_start
+    ):
+        assignments = c.execute(
+            """SELECT a.start_time,a.end_time,sh.meal
+               FROM assignments a
+               JOIN shifts sh ON sh.id=a.shift_id
+               WHERE a.staff_id=?
+                 AND sh.id<>?
+                 AND sh.shift_date=?""",
+            (
+                staff_id,
+                shift_id,
+                shift["shift_date"]
+            )
+        ).fetchall()
+
+        for other in assignments:
+            old_start = _minutes(other["start_time"])
+            old_end = _minutes(other["end_time"])
+
+            if (
+                old_start is not None
+                and old_end is not None
+                and max(new_start, old_start)
+                    < min(new_end, old_end)
+            ):
+                conflicts.append(
+                    "Shift time overlaps an existing "
+                    f"{other['meal']} assignment."
+                )
+                break
+
+    shift_day = date.fromisoformat(
+        shift["shift_date"]
+    )
+
+    week_start = shift_day - timedelta(
+        days=shift_day.weekday()
+    )
+
+    week_end = week_start + timedelta(days=6)
+
+    weekly_count = c.execute(
+        """SELECT COUNT(DISTINCT sh.id)
+           FROM assignments a
+           JOIN shifts sh ON sh.id=a.shift_id
+           WHERE a.staff_id=?
+             AND sh.id<>?
+             AND sh.shift_date BETWEEN ? AND ?""",
+        (
+            staff_id,
+            shift_id,
+            week_start.isoformat(),
+            week_end.isoformat()
+        )
+    ).fetchone()[0]
+
+    if weekly_count >= staff["max_shifts_week"]:
+        conflicts.append(
+            "Weekly shift limit reached "
+            f"({staff['max_shifts_week']})."
+        )
+
+    return conflicts
+
+
 def export_csv(name, headers, rows):
     s=io.StringIO(); w=csv.writer(s); w.writerow(headers); w.writerows(rows)
     b=io.BytesIO(s.getvalue().encode()); b.seek(0); return send_file(b,as_attachment=True,download_name=name,mimetype='text/csv')
@@ -233,9 +399,57 @@ def create_app(test_config=None):
     @app.post('/api/schedule/<int:shift_id>/assign')
     @login_required
     def api_assign(shift_id):
-        data=request.get_json(force=True); sid=int(data['staff_id']); position=data.get('position','Server'); order=int(data.get('sort_order',0))
-        with connect() as c: c.execute("INSERT INTO assignments(shift_id,staff_id,position,sort_order,reason) VALUES(?,?,?,?,?) ON CONFLICT(shift_id,staff_id) DO UPDATE SET position=excluded.position,sort_order=excluded.sort_order",(shift_id,sid,position,order,'Manually assigned'))
-        return {'ok':True}
+        data = request.get_json(force=True)
+        sid = int(data['staff_id'])
+        position = data.get('position', 'Server')
+        order = int(data.get('sort_order', 0))
+        start_time = data.get('start_time', '')
+        end_time = data.get('end_time', '')
+
+        with connect() as c:
+            conflicts = schedule_conflicts(
+                c,
+                shift_id,
+                sid,
+                start_time,
+                end_time
+            )
+
+            if conflicts:
+                return jsonify(
+                    ok=False,
+                    conflicts=conflicts
+                ), 409
+
+            c.execute(
+                """INSERT INTO assignments(
+                       shift_id,
+                       staff_id,
+                       position,
+                       start_time,
+                       end_time,
+                       sort_order,
+                       reason
+                   )
+                   VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(shift_id,staff_id)
+                   DO UPDATE SET
+                       position=excluded.position,
+                       start_time=excluded.start_time,
+                       end_time=excluded.end_time,
+                       sort_order=excluded.sort_order""",
+                (
+                    shift_id,
+                    sid,
+                    position,
+                    start_time,
+                    end_time,
+                    order,
+                    'Manually assigned'
+                )
+            )
+
+        return {'ok': True}
 
     @app.post('/api/schedule/<int:shift_id>/remove')
     @login_required
@@ -247,8 +461,74 @@ def create_app(test_config=None):
     @app.post('/schedule/<int:shift_id>/publish')
     @login_required
     def publish(shift_id):
-        with connect() as c: c.execute("UPDATE shifts SET status='published' WHERE id=?",(shift_id,))
-        flash('✅ Schedule published.','success'); return redirect(url_for('schedule_builder',shift_id=shift_id))
+        with connect() as c:
+            assignments = c.execute(
+                """SELECT staff_id,start_time,end_time
+                   FROM assignments
+                   WHERE shift_id=?""",
+                (shift_id,)
+            ).fetchall()
+
+            blocked = []
+
+            for assignment in assignments:
+                conflicts = schedule_conflicts(
+                    c,
+                    shift_id,
+                    assignment['staff_id'],
+                    assignment['start_time'],
+                    assignment['end_time']
+                )
+
+                if conflicts:
+                    person = c.execute(
+                        "SELECT name FROM staff WHERE id=?",
+                        (assignment['staff_id'],)
+                    ).fetchone()
+
+                    name = (
+                        person['name']
+                        if person
+                        else f"Staff #{assignment['staff_id']}"
+                    )
+
+                    blocked.extend(
+                        f"{name}: {message}"
+                        for message in conflicts
+                    )
+
+            if blocked:
+                flash(
+                    "⚠️ Cannot publish schedule: "
+                    + " | ".join(blocked),
+                    "error"
+                )
+
+                return redirect(
+                    url_for(
+                        'schedule_builder',
+                        shift_id=shift_id
+                    )
+                )
+
+            c.execute(
+                """UPDATE shifts
+                   SET status='published'
+                   WHERE id=?""",
+                (shift_id,)
+            )
+
+        flash(
+            '✅ Schedule published.',
+            'success'
+        )
+
+        return redirect(
+            url_for(
+                'schedule_builder',
+                shift_id=shift_id
+            )
+        )
 
     @app.get('/schedules')
     @login_required
