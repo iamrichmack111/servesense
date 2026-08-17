@@ -14,7 +14,10 @@ def sample():
         python_files=5,
         lines=1500,
         functions=50,
-        test_count=11,
+        test_count=15,
+        workflow_count=2,
+        automation_triggers=3,
+        automation_capabilities=4,
     )
 
 
@@ -52,11 +55,13 @@ def test_weissman_score_is_weighted_components():
     result = sample()
 
     expected = round(
-        result["complexity"] * 0.20
-        + result["maintainability"] * 0.20
-        + result["throughput"] * 0.25
-        + result["reliability"] * 0.20
-        + result["velocity"] * 0.15,
+        result["complexity"] * 0.15
+        + result["maintainability"] * 0.15
+        + result["throughput"] * 0.15
+        + result["reliability"] * 0.15
+        + result["velocity"] * 0.10
+        + result["automation"] * 0.15
+        + result["testing"] * 0.15,
         2,
     )
 
@@ -65,3 +70,15 @@ def test_weissman_score_is_weighted_components():
 
 def test_score_is_deterministic():
     assert sample() == sample()
+
+
+def test_automation_score_is_bounded():
+    result = sample()
+
+    assert 0 <= result["automation"] <= 10
+
+
+def test_testing_score_is_bounded():
+    result = sample()
+
+    assert 0 <= result["testing"] <= 10

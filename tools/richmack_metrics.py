@@ -52,6 +52,47 @@ def python_stats(root=ROOT):
     }
 
 
+def automation_stats(root=ROOT):
+    workflows = list(
+        (root / ".github" / "workflows").glob("*.yml")
+    ) + list(
+        (root / ".github" / "workflows").glob("*.yaml")
+    )
+
+    text = "\n".join(
+        path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
+        for path in workflows
+    )
+
+    triggers = sum(
+        token in text
+        for token in (
+            "pull_request:",
+            "push:",
+            "workflow_dispatch:",
+        )
+    )
+
+    capabilities = sum(
+        token in text
+        for token in (
+            "pytest",
+            "docker/build-push-action",
+            "ghcr.io",
+            "setup-python",
+        )
+    )
+
+    return {
+        "workflow_count": len(workflows),
+        "automation_triggers": triggers,
+        "automation_capabilities": capabilities,
+    }
+
+
 def count_tests(root=ROOT):
     tests = 0
 
@@ -89,6 +130,9 @@ def component_scores(
     lines,
     functions,
     test_count,
+    workflow_count,
+    automation_triggers,
+    automation_capabilities,
 ):
     active_hours = max(float(active_hours), 0.1)
 
@@ -193,7 +237,7 @@ def component_scores(
     # ---------------------------------------------------------
     # RELIABILITY — 0..10
     #
-    # Automated test pass rate + CI health.
+    # Current pipeline health + test execution health.
     # ---------------------------------------------------------
 
     pass_rate = (
@@ -204,17 +248,14 @@ def component_scores(
 
     reliability = clamp(
         (
-            pass_rate * 0.75
-            + (1.0 if ci_success else 0.0) * 0.25
+            (1.0 if ci_success else 0.0) * 0.60
+            + pass_rate * 0.40
         )
         * 10
     )
 
     # ---------------------------------------------------------
     # VELOCITY — 0..10
-    #
-    # Closed roadmap work relative to hours, penalized by
-    # unresolved work.
     # ---------------------------------------------------------
 
     completed_per_hour = (
@@ -237,12 +278,81 @@ def component_scores(
         * 10
     )
 
+    # ---------------------------------------------------------
+    # AUTOMATION — 0..10
+    #
+    # Measures automated workflows, triggers, and capabilities.
+    # ---------------------------------------------------------
+
+    workflow_factor = min(
+        workflow_count / 3.0,
+        1.0,
+    )
+
+    trigger_factor = min(
+        automation_triggers / 3.0,
+        1.0,
+    )
+
+    capability_factor = min(
+        automation_capabilities / 4.0,
+        1.0,
+    )
+
+    automation = clamp(
+        (
+            workflow_factor * 0.35
+            + trigger_factor * 0.30
+            + capability_factor * 0.35
+        )
+        * 10
+    )
+
+    # ---------------------------------------------------------
+    # TESTING — 0..10
+    #
+    # Pass rate + test volume + test/function density.
+    # ---------------------------------------------------------
+
+    test_volume_factor = min(
+        test_count / 20.0,
+        1.0,
+    )
+
+    test_density_factor = min(
+        test_count / max(functions * 0.30, 1),
+        1.0,
+    )
+
+    testing = clamp(
+        (
+            pass_rate * 0.50
+            + test_volume_factor * 0.25
+            + test_density_factor * 0.25
+        )
+        * 10
+    )
+
+    # ---------------------------------------------------------
+    # FINAL MULTI-FACTOR ENGINEERING SCORE
+    #
+    # Complexity       15%
+    # Maintainability  15%
+    # Throughput       15%
+    # Reliability      15%
+    # Velocity         10%
+    # Automation       15%
+    # Testing          15%
+    # ---------------------------------------------------------
+
     final_score = round(
-        complexity * 0.20
-        + maintainability * 0.20
-        + throughput * 0.25
-        + reliability * 0.20
-        + velocity * 0.15,
+        complexity * 0.15
+        + maintainability * 0.15
+        + throughput * 0.15
+        + reliability * 0.15
+        + velocity * 0.10
+        + automation * 0.15
+        + testing * 0.15,
         2,
     )
 
@@ -262,6 +372,14 @@ def component_scores(
         ),
         "velocity": round(
             velocity,
+            2,
+        ),
+        "automation": round(
+            automation,
+            2,
+        ),
+        "testing": round(
+            testing,
             2,
         ),
         "final_score": final_score,
@@ -285,6 +403,7 @@ def calculate_metrics(
 ):
     stats = python_stats()
     test_count = count_tests()
+    auto = automation_stats()
 
     scores = component_scores(
         merged_prs=merged_prs,
@@ -299,10 +418,14 @@ def calculate_metrics(
         lines=stats["lines"],
         functions=stats["functions"],
         test_count=test_count,
+        workflow_count=auto["workflow_count"],
+        automation_triggers=auto["automation_triggers"],
+        automation_capabilities=auto["automation_capabilities"],
     )
 
     return {
         **stats,
+        **auto,
         "test_count": test_count,
         **scores,
     }
@@ -337,6 +460,16 @@ def print_scorecard(metrics):
         f"{metrics['velocity']:.2f} / 10"
     )
 
+    print(
+        f"Automation:      "
+        f"{metrics['automation']:.2f} / 10"
+    )
+
+    print(
+        f"Testing:         "
+        f"{metrics['testing']:.2f} / 10"
+    )
+
     print()
     print(
         f"WEISSMAN-STYLE SCORE: "
@@ -363,6 +496,16 @@ def print_scorecard(metrics):
     print(
         f"Automated tests: "
         f"{metrics['test_count']}"
+    )
+
+    print(
+        f"Automation workflows: "
+        f"{metrics['workflow_count']}"
+    )
+
+    print(
+        f"Automation triggers: "
+        f"{metrics['automation_triggers']}"
     )
 
 

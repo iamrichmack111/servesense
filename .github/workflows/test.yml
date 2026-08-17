@@ -56,6 +56,6 @@ jobs:
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
-          SERVESENSE_ACTIVE_HOURS: "1"
+          SERVESENSE_ACTIVE_HOURS: "3.3"
         run: |
           ./tools/servesense_score.sh
