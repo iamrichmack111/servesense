@@ -1,5 +1,5 @@
 from __future__ import annotations
-import csv, io, os, secrets, sqlite3, zipfile
+import csv, io, os, secrets, sqlite3, zipfile, json, urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
@@ -743,6 +743,114 @@ def seed_demo(c):
         status='preferred' if name in ('Ashley Brown','Amanda Collins','Brandon White') else 'available'
         c.execute("INSERT OR REPLACE INTO availability(staff_id,shift_date,meal,status) VALUES(?,?,?,?)",(ids[name],target,'Dinner',status))
 
+
+def _github_json(path):
+    url = "https://api.github.com/repos/iamrichmack111/servesense" + path
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "ServeSense-Metrics",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return json.load(response)
+    except Exception:
+        return None
+
+
+def richmack_metrics():
+    repo = _github_json("") or {}
+    issues = _github_json("/issues?state=all&per_page=100") or []
+    pulls = _github_json("/pulls?state=all&per_page=100") or []
+    releases = _github_json("/releases?per_page=100") or []
+
+    issues = [
+        x for x in issues
+        if "pull_request" not in x
+    ]
+
+    open_issues = [
+        x for x in issues
+        if x.get("state") == "open"
+    ]
+
+    closed_issues = [
+        x for x in issues
+        if x.get("state") == "closed"
+    ]
+
+    open_prs = [
+        x for x in pulls
+        if x.get("state") == "open"
+    ]
+
+    merged_prs = [
+        x for x in pulls
+        if x.get("merged_at")
+    ]
+
+    issue_total = len(issues)
+    pr_total = len(pulls)
+
+    closure_rate = (
+        len(closed_issues) / issue_total * 100
+        if issue_total else 0
+    )
+
+    merge_rate = (
+        len(merged_prs) / pr_total * 100
+        if pr_total else 0
+    )
+
+    roadmap_completion = closure_rate
+
+    richmack_score = round(
+        closure_rate * 0.40
+        + merge_rate * 0.35
+        + roadmap_completion * 0.25,
+        1
+    )
+
+    weissman_score = round(
+        (
+            (1 + len(merged_prs))
+            * (1 + len(closed_issues))
+        )
+        /
+        (
+            1
+            + len(open_issues)
+            + len(open_prs)
+        ),
+        2
+    )
+
+    return {
+        "github_ok": bool(repo),
+        "open_issues": len(open_issues),
+        "closed_issues": len(closed_issues),
+        "issue_total": issue_total,
+        "closure_rate": round(closure_rate, 1),
+        "open_prs": len(open_prs),
+        "merged_prs": len(merged_prs),
+        "pr_total": pr_total,
+        "merge_rate": round(merge_rate, 1),
+        "roadmap_completion": round(roadmap_completion, 1),
+        "richmack_score": richmack_score,
+        "weissman_score": weissman_score,
+        "releases": len(releases),
+        "latest_release": (
+            releases[0].get("tag_name")
+            if releases else None
+        ),
+        "stars": repo.get("stargazers_count", 0),
+        "forks": repo.get("forks_count", 0),
+    }
+
+
 def create_app(test_config=None):
     app=Flask(__name__)
     app.config.update(SECRET_KEY=os.getenv('SECRET_KEY',secrets.token_hex(32)),ADMIN_USERNAME=os.getenv('ADMIN_USERNAME','owner'),ADMIN_PASSWORD=os.getenv('ADMIN_PASSWORD','ServeSenseDemo123!'),RESTAURANT_NAME=os.getenv('RESTAURANT_NAME','Copper Oak Kitchen & Bar'),APP_VERSION='1.0.0')
@@ -1119,6 +1227,14 @@ def create_app(test_config=None):
         if not current_user.is_owner or username==current_user.id: abort(403)
         with connect() as c: c.execute("UPDATE users SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE username=?",(username,))
         return redirect(url_for('admins'))
+
+    @app.get('/metrics')
+    @login_required
+    def metrics():
+        return render_template(
+            'metrics.html',
+            metrics=richmack_metrics()
+        )
 
     @app.route('/settings',methods=['GET','POST'])
     @login_required
