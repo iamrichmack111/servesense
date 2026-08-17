@@ -76,3 +76,33 @@ Change these before public deployment.
 
 ### Administrator users
 ![Administrator users](docs/screenshots/admin-users.png)
+
+## GitHub Container Package
+
+ServeSense is published as a Docker image through GitHub Container Registry.
+
+Pull the latest release:
+
+```bash
+docker pull ghcr.io/iamrichmack111/servesense:latest
+```
+
+Run it:
+
+```bash
+docker run -d \
+  --name servesense \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 8003:8000 \
+  -v "$(pwd)/data:/app/data" \
+  ghcr.io/iamrichmack111/servesense:latest
+```
+
+Versioned releases can also be pulled directly:
+
+```bash
+docker pull ghcr.io/iamrichmack111/servesense:v0.2.0
+```
+
+The container image is automatically built for both AMD64 and ARM64 by GitHub Actions.
