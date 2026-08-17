@@ -50,23 +50,377 @@ def setting(c,key,default=''):
     r=c.execute("SELECT value FROM settings WHERE key=?",(key,)).fetchone(); return r[0] if r else default
 
 def score_people(c, shift_date, meal):
-    rows=c.execute('''SELECT s.*,COALESCE(AVG(sa.sales),0) avg_sales,COALESCE(AVG(CASE WHEN sa.hours>0 THEN sa.sales/sa.hours END),0) sph,COUNT(sa.id) logged,
-      COALESCE(SUM(CASE WHEN sa.shift_date>=date(?,'-7 day') THEN sa.hours ELSE 0 END),0) recent_hours,COALESCE(a.status,'available') avail
-      FROM staff s LEFT JOIN sales sa ON sa.staff_id=s.id LEFT JOIN availability a ON a.staff_id=s.id AND a.shift_date=? AND a.meal=?
-      WHERE s.active=1 GROUP BY s.id''',(shift_date,shift_date,meal)).fetchall()
-    result=[]
-    for r in rows:
-        if r['avail'] in ('unavailable','pto'): continue
-        perf=r['sph']*.65+r['avg_sales']*.012
-        exp=min(r['logged'],20)*1.5
-        pref=12 if r['avail']=='preferred' else 0
-        fatigue=max(0,r['recent_hours']-32)*1.5
-        score=round(perf+exp+pref-fatigue,1)
-        reason=("New employee; availability and role fit" if not r['logged'] else f"${r['avg_sales']:.0f} avg sales · ${r['sph']:.0f}/labor hr · {r['logged']} shifts")
-        if pref: reason += " · preferred shift"
-        if fatigue: reason += " · overtime/fatigue adjustment"
-        result.append({**dict(r),'score':score,'reason':reason})
-    return sorted(result,key=lambda x:x['score'],reverse=True)
+    rows = c.execute(
+        """
+        SELECT
+            s.*,
+
+            COUNT(sa.id) AS logged,
+
+            COALESCE(
+                AVG(
+                    CASE
+                        WHEN sa.hours > 0
+                        THEN sa.sales / sa.hours
+                    END
+                ),
+                0
+            ) AS career_sph,
+
+            COALESCE(
+                AVG(
+                    CASE
+                        WHEN sa.meal = ?
+                         AND sa.hours > 0
+                        THEN sa.sales / sa.hours
+                    END
+                ),
+                0
+            ) AS meal_sph,
+
+            COALESCE(
+                AVG(
+                    CASE
+                        WHEN sa.meal = ?
+                        THEN sa.sales
+                    END
+                ),
+                0
+            ) AS meal_avg_sales,
+
+            COALESCE(
+                AVG(
+                    CASE
+                        WHEN sa.hours > 0
+                        THEN CAST(sa.covers AS REAL) / sa.hours
+                    END
+                ),
+                0
+            ) AS covers_per_hour,
+
+            COALESCE(
+                AVG(
+                    CASE
+                        WHEN sa.shift_date >= date(?, '-14 day')
+                         AND sa.hours > 0
+                        THEN sa.sales / sa.hours
+                    END
+                ),
+                0
+            ) AS recent_sph,
+
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN sa.shift_date >= date(?, '-7 day')
+                        THEN sa.hours
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS recent_hours,
+
+            COALESCE(
+                AVG(sa.late_minutes),
+                0
+            ) AS avg_late_minutes,
+
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN sa.late_minutes > 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS late_shifts,
+
+            COALESCE(
+                a.status,
+                'available'
+            ) AS avail
+
+        FROM staff s
+
+        LEFT JOIN sales sa
+          ON sa.staff_id = s.id
+
+        LEFT JOIN availability a
+          ON a.staff_id = s.id
+         AND a.shift_date = ?
+         AND a.meal = ?
+
+        WHERE s.active = 1
+
+        GROUP BY s.id
+        """,
+        (
+            meal,
+            meal,
+            shift_date,
+            shift_date,
+            shift_date,
+            meal,
+        ),
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    active = [
+        r for r in rows
+        if r["avail"] not in ("unavailable", "pto")
+    ]
+
+    if not active:
+        return []
+
+    def max_value(key, minimum=1.0):
+        return max(
+            minimum,
+            max(float(r[key] or 0) for r in active)
+        )
+
+    max_meal_sph = max_value("meal_sph")
+    max_career_sph = max_value("career_sph")
+    max_recent_sph = max_value("recent_sph")
+    max_covers = max_value("covers_per_hour")
+    max_experience = max_value("logged")
+
+    result = []
+
+    for r in active:
+        logged = int(r["logged"] or 0)
+
+        # ----------------------------------------------------
+        # 1. Meal-specific efficiency — 25 points
+        # ----------------------------------------------------
+        source_sph = (
+            float(r["meal_sph"] or 0)
+            if float(r["meal_sph"] or 0) > 0
+            else float(r["career_sph"] or 0)
+        )
+
+        sph_base = (
+            max_meal_sph
+            if float(r["meal_sph"] or 0) > 0
+            else max_career_sph
+        )
+
+        efficiency_score = min(
+            25.0,
+            (source_sph / sph_base) * 25.0
+            if sph_base > 0
+            else 0
+        )
+
+        # ----------------------------------------------------
+        # 2. Recent performance — 15 points
+        # ----------------------------------------------------
+        recent_score = min(
+            15.0,
+            (
+                float(r["recent_sph"] or 0)
+                / max_recent_sph
+            ) * 15.0
+            if max_recent_sph > 0
+            else 0
+        )
+
+        # ----------------------------------------------------
+        # 3. Guest throughput — 10 points
+        # ----------------------------------------------------
+        cover_score = min(
+            10.0,
+            (
+                float(r["covers_per_hour"] or 0)
+                / max_covers
+            ) * 10.0
+            if max_covers > 0
+            else 0
+        )
+
+        # ----------------------------------------------------
+        # 4. Experience — 10 points
+        # ----------------------------------------------------
+        experience_score = min(
+            10.0,
+            (
+                logged
+                / max_experience
+            ) * 10.0
+            if max_experience > 0
+            else 0
+        )
+
+        # ----------------------------------------------------
+        # 5. Reliability — 15 points
+        # ----------------------------------------------------
+        late_minutes = float(
+            r["avg_late_minutes"] or 0
+        )
+
+        late_shifts = int(
+            r["late_shifts"] or 0
+        )
+
+        reliability_penalty = min(
+            15.0,
+            late_minutes * 0.35
+            + late_shifts * 0.75
+        )
+
+        reliability_score = max(
+            0.0,
+            15.0 - reliability_penalty
+        )
+
+        # ----------------------------------------------------
+        # 6. Availability preference — 10 points
+        # ----------------------------------------------------
+        preference_score = (
+            10.0
+            if r["avail"] == "preferred"
+            else 5.0
+        )
+
+        # ----------------------------------------------------
+        # 7. Fatigue / workload — 10 points
+        # ----------------------------------------------------
+        recent_hours = float(
+            r["recent_hours"] or 0
+        )
+
+        if recent_hours <= 32:
+            fatigue_score = 10.0
+        elif recent_hours >= 48:
+            fatigue_score = 0.0
+        else:
+            fatigue_score = max(
+                0.0,
+                10.0
+                - ((recent_hours - 32) / 16) * 10.0
+            )
+
+        # ----------------------------------------------------
+        # 8. Historical meal familiarity — 5 points
+        # ----------------------------------------------------
+        meal_familiarity_score = (
+            5.0
+            if float(r["meal_sph"] or 0) > 0
+            else 2.5
+            if logged > 0
+            else 0.0
+        )
+
+        score = round(
+            efficiency_score
+            + recent_score
+            + cover_score
+            + experience_score
+            + reliability_score
+            + preference_score
+            + fatigue_score
+            + meal_familiarity_score,
+            1
+        )
+
+        components = {
+            "efficiency": round(
+                efficiency_score,
+                1
+            ),
+            "recent": round(
+                recent_score,
+                1
+            ),
+            "covers": round(
+                cover_score,
+                1
+            ),
+            "experience": round(
+                experience_score,
+                1
+            ),
+            "reliability": round(
+                reliability_score,
+                1
+            ),
+            "preference": round(
+                preference_score,
+                1
+            ),
+            "fatigue": round(
+                fatigue_score,
+                1
+            ),
+            "meal_fit": round(
+                meal_familiarity_score,
+                1
+            ),
+        }
+
+        if logged == 0:
+            reason = (
+                "New employee · no historical performance yet"
+            )
+        else:
+            reason_parts = [
+                f"${source_sph:.0f}/labor hr",
+                f"{float(r['covers_per_hour'] or 0):.1f} covers/hr",
+                f"{logged} logged shifts",
+            ]
+
+            if float(r["recent_sph"] or 0) > 0:
+                reason_parts.append(
+                    f"${float(r['recent_sph']):.0f} recent SPLH"
+                )
+
+            if r["avail"] == "preferred":
+                reason_parts.append(
+                    "preferred shift"
+                )
+
+            if late_minutes > 0:
+                reason_parts.append(
+                    f"{late_minutes:.0f} avg late min"
+                )
+            else:
+                reason_parts.append(
+                    "strong punctuality"
+                )
+
+            if recent_hours > 32:
+                reason_parts.append(
+                    f"{recent_hours:.0f} recent hrs"
+                )
+
+            if float(r["meal_sph"] or 0) > 0:
+                reason_parts.append(
+                    f"{meal} experience"
+                )
+
+            reason = " · ".join(reason_parts)
+
+        result.append(
+            {
+                **dict(r),
+                "score": score,
+                "reason": reason,
+                "components": components,
+            }
+        )
+
+    return sorted(
+        result,
+        key=lambda x: (
+            x["score"],
+            x["meal_sph"],
+            x["career_sph"],
+        ),
+        reverse=True,
+    )
 
 def _minutes(value):
     if not value or ":" not in value:
