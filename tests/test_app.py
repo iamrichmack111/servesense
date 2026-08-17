@@ -25,6 +25,35 @@ def app(tmp_path, monkeypatch):
         }
     )
 
+    # Make authentication deterministic instead of depending
+    # on application bootstrap/seed behavior.
+    with web.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO users(
+                username,
+                password_hash,
+                role,
+                active,
+                created_at
+            )
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(username)
+            DO UPDATE SET
+                password_hash=excluded.password_hash,
+                role=excluded.role,
+                active=excluded.active
+            """,
+            (
+                "testadmin",
+                web.generate_password_hash("testpassword"),
+                "owner",
+                1,
+                web.now(),
+            ),
+        )
+        connection.commit()
+
     yield app
 
 
