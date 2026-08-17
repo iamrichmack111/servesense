@@ -51,3 +51,11 @@ jobs:
       - name: Verify Weissman test exists
         run: |
           grep -q "def test_weissman_score" tests/test_richmack_metrics.py
+
+      - name: Print engineering scorecard
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVESENSE_ACTIVE_HOURS: "1"
+        run: |
+          ./tools/servesense_score.sh
