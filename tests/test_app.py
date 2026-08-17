@@ -73,7 +73,7 @@ def login(client):
         "/login",
         data={
             "username": "testadmin",
-            "passw rd": "testpassword",
+            "password": "testpassword",
         },
         follow_redirects=False,
     )
