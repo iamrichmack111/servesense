@@ -1,0 +1,52 @@
+name: ServeSense Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Python syntax check
+        run: |
+          python -m py_compile app/web.py
+          python -m py_compile tools/richmack_metrics.py
+
+      - name: Run ServeSense tests
+        env:
+          ADMIN_USERNAME: testadmin
+          ADMIN_PASSWORD: testpassword
+          SECRET_KEY: ci-secret
+        run: |
+          pytest -q
+
+      - name: Verify metrics are internal only
+        run: |
+          ! grep -q "@app.get('/metrics')" app/web.py
+          ! grep -q "Metrics','metrics" app/templates/base.html
+
+      - name: Verify Weissman test exists
+        run: |
+          grep -q "def test_weissman_score" tests/test_richmack_metrics.py
