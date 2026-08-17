@@ -1228,13 +1228,6 @@ def create_app(test_config=None):
         with connect() as c: c.execute("UPDATE users SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE username=?",(username,))
         return redirect(url_for('admins'))
 
-    @app.get('/metrics')
-    @login_required
-    def metrics():
-        return render_template(
-            'metrics.html',
-            metrics=richmack_metrics()
-        )
 
     @app.route('/settings',methods=['GET','POST'])
     @login_required
