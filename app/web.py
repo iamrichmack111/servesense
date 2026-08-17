@@ -234,6 +234,136 @@ def schedule_conflicts(c, shift_id, staff_id, start_time="", end_time=""):
     return conflicts
 
 
+
+def _scheduled_hours(start_time, end_time, fallback=6.0):
+    """Return planned hours, falling back when schedule times are blank."""
+    start = _minutes(start_time)
+    end = _minutes(end_time)
+
+    if start is None or end is None or end <= start:
+        return fallback
+
+    return round((end - start) / 60.0, 2)
+
+
+def labor_guardrail(c, shift_id):
+    shift = c.execute(
+        "SELECT * FROM shifts WHERE id=?",
+        (shift_id,)
+    ).fetchone()
+
+    if not shift:
+        return {
+            "labor_cost": 0,
+            "labor_pct": 0,
+            "target_pct": 22,
+            "target_dollars": 0,
+            "variance_dollars": 0,
+            "splh": 0,
+            "scheduled_hours": 0,
+            "status": "unknown",
+            "assigned_count": 0,
+        }
+
+    try:
+        target_pct = float(
+            setting(
+                c,
+                "default_labor_target",
+                "22"
+            ) or 22
+        )
+    except (TypeError, ValueError):
+        target_pct = 22.0
+
+    expected_sales = float(
+        shift["expected_sales"] or 0
+    )
+
+    assignments = c.execute(
+        """SELECT
+               a.start_time,
+               a.end_time,
+               s.pay_rate,
+               s.pay_type
+           FROM assignments a
+           JOIN staff s ON s.id=a.staff_id
+           WHERE a.shift_id=?""",
+        (shift_id,)
+    ).fetchall()
+
+    labor_cost = 0.0
+    scheduled_hours = 0.0
+
+    for row in assignments:
+
+        hours = _scheduled_hours(
+            row["start_time"],
+            row["end_time"]
+        )
+
+        scheduled_hours += hours
+
+        if row["pay_type"] == "salary":
+            # Approximate one scheduled shift as 1/5
+            # of the employee's weekly salary cost.
+            labor_cost += (
+                float(row["pay_rate"] or 0)
+                / 52.0
+                / 5.0
+            )
+        else:
+            labor_cost += (
+                float(row["pay_rate"] or 0)
+                * hours
+            )
+
+    target_dollars = (
+        expected_sales
+        * target_pct
+        / 100.0
+    )
+
+    labor_pct = (
+        labor_cost
+        / expected_sales
+        * 100.0
+        if expected_sales > 0
+        else 0.0
+    )
+
+    splh = (
+        expected_sales
+        / scheduled_hours
+        if scheduled_hours > 0
+        else 0.0
+    )
+
+    variance = target_dollars - labor_cost
+
+    if expected_sales <= 0:
+        status = "no-sales-target"
+    elif labor_cost > target_dollars:
+        status = "over"
+    else:
+        status = "under"
+
+    return {
+        "labor_cost": round(labor_cost, 2),
+        "labor_pct": round(labor_pct, 1),
+        "target_pct": round(target_pct, 1),
+        "target_dollars": round(target_dollars, 2),
+        "variance_dollars": round(variance, 2),
+        "splh": round(splh, 2),
+        "scheduled_hours": round(
+            scheduled_hours,
+            2
+        ),
+        "status": status,
+        "assigned_count": len(assignments),
+    }
+
+
 def export_csv(name, headers, rows):
     s=io.StringIO(); w=csv.writer(s); w.writerow(headers); w.writerows(rows)
     b=io.BytesIO(s.getvalue().encode()); b.seek(0); return send_file(b,as_attachment=True,download_name=name,mimetype='text/csv')
@@ -390,11 +520,49 @@ def create_app(test_config=None):
     @login_required
     def schedule_builder(shift_id):
         with connect() as c:
-            shift=c.execute('SELECT * FROM shifts WHERE id=?',(shift_id,)).fetchone()
-            if not shift: abort(404)
-            staff=c.execute("SELECT * FROM staff WHERE active=1 ORDER BY department,role,name").fetchall()
-            assigned=c.execute("SELECT a.*,s.name,s.role,s.department FROM assignments a JOIN staff s ON s.id=a.staff_id WHERE shift_id=? ORDER BY sort_order",(shift_id,)).fetchall()
-        return render_template('schedule_builder.html',shift=shift,staff=staff,assigned=assigned)
+            shift = c.execute(
+                'SELECT * FROM shifts WHERE id=?',
+                (shift_id,)
+            ).fetchone()
+
+            if not shift:
+                abort(404)
+
+            staff = c.execute(
+                """SELECT *
+                   FROM staff
+                   WHERE active=1
+                   ORDER BY department,role,name"""
+            ).fetchall()
+
+            assigned = c.execute(
+                """SELECT
+                       a.*,
+                       s.name,
+                       s.role,
+                       s.department,
+                       s.pay_rate,
+                       s.pay_type
+                   FROM assignments a
+                   JOIN staff s
+                     ON s.id=a.staff_id
+                   WHERE shift_id=?
+                   ORDER BY sort_order""",
+                (shift_id,)
+            ).fetchall()
+
+            labor = labor_guardrail(
+                c,
+                shift_id
+            )
+
+        return render_template(
+            'schedule_builder.html',
+            shift=shift,
+            staff=staff,
+            assigned=assigned,
+            labor=labor
+        )
 
     @app.post('/api/schedule/<int:shift_id>/assign')
     @login_required
