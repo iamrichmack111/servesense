@@ -39,8 +39,9 @@ jobs:
           ADMIN_USERNAME: testadmin
           ADMIN_PASSWORD: testpassword
           SECRET_KEY: ci-secret
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          pytest -q
+          python -m pytest -q
 
       - name: Verify metrics are internal only
         run: |
