@@ -1,0 +1,93 @@
+name: Deploy ServeSense
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: servesense-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Lightsail
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.LIGHTSAIL_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Test SSH
+        env:
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER: ${{ secrets.LIGHTSAIL_USER }}
+        run: |
+          ssh -o IdentitiesOnly=yes \
+            "$USER@$HOST" \
+            'echo "ServeSense SSH connection successful"'
+
+      - name: Upload ServeSense
+        env:
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER: ${{ secrets.LIGHTSAIL_USER }}
+        run: |
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.env' \
+            --exclude '*.db' \
+            --exclude '*.sqlite' \
+            --exclude '*.sqlite3' \
+            ./ \
+            "$USER@$HOST:/home/ubuntu/servesense/"
+
+      - name: Deploy ServeSense
+        env:
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          USER: ${{ secrets.LIGHTSAIL_USER }}
+        run: |
+          ssh -o IdentitiesOnly=yes "$USER@$HOST" <<'REMOTE'
+            set -e
+
+            cd /home/ubuntu/servesense
+
+            test -f .env || {
+              echo "ERROR: production .env is missing"
+              exit 1
+            }
+
+            echo "Building ServeSense..."
+            docker compose build
+
+            echo "Starting ServeSense..."
+            docker compose up -d --force-recreate
+
+            echo "Waiting for application..."
+            sleep 5
+
+            echo "Checking container..."
+            docker compose ps
+
+            echo "Checking ServeSense..."
+            curl --fail \
+              --silent \
+              --show-error \
+              http://127.0.0.1:8003/login \
+              >/dev/null
+
+            echo "ServeSense deployment successful."
+          REMOTE

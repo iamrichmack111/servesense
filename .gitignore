@@ -1,3 +1,14 @@
 .DS_Store
 __pycache__/
 *.py[cod]
+
+# Production secrets
+.env
+
+# Runtime data
+*.db
+*.sqlite
+*.sqlite3
+
+# macOS
+.DS_Store
