@@ -1,5 +1,10 @@
 # ServeSense
 
+[![Playwright Screenshots](https://github.com/iamrichmack111/servesense/actions/workflows/playwright-screenshots.yml/badge.svg)](https://github.com/iamrichmack111/servesense/actions/workflows/playwright-screenshots.yml)
+[![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+
+
 ServeSense is a Dockerized Flask restaurant operations platform with staff/pay-rate management, sales tracking, availability/PTO, AI-assisted staffing recommendations, drag-and-drop scheduling, reports, multiple administrator accounts, CSV exports, and full database backups.
 
 ## Start
@@ -106,3 +111,17 @@ docker pull ghcr.io/iamrichmack111/servesense:v0.2.0
 ```
 
 The container image is automatically built for both AMD64 and ARM64 by GitHub Actions.
+
+
+## Automated UI screenshots
+
+Playwright captures the main authenticated ServeSense screens in Chromium. Run locally with:
+
+```bash
+pip install playwright
+python -m playwright install chromium
+docker compose up --build -d
+python tests/playwright_screenshots.py
+```
+
+Screenshots are written to `docs/screenshots/playwright/` and uploaded as a GitHub Actions artifact on CI runs.
